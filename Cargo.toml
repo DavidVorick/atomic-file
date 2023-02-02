@@ -1,0 +1,15 @@
+[package]
+name = "atomic-file"
+version = "0.0.1"
+edition = "2021"
+description = "library for securely writing to files"
+license = "MIT"
+repository = "https://github.com/DavidVorick/atomic-file"
+
+[dependencies]
+anyhow = "1.0"
+async-std = {version = "1", features = ["attributes"]}
+sha2 = "0.10"
+
+[dev-dependencies]
+testdir = "0.7.0"
