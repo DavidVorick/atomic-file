@@ -231,12 +231,12 @@ fn identifier_and_version_from_metadata(metadata: &[u8]) -> Result<(String, u8),
     let mut clean_identifier = false;
     let mut identifier = "".to_string();
     for i in 0..201 {
-        if metadata[i + 37] == 255 {
+        if metadata[i + 37] == '\n' as u8 && metadata[i + 37 + 1] == 255 {
             clean_identifier = true;
             break;
         }
         if metadata[i + 37] > 127 {
-            bail!("identifier contains non-ascii characters");
+            bail!("identifier contains non-ascii characters before termination sequence");
         }
         identifier.push(metadata[i + 37] as char);
     }
@@ -266,7 +266,8 @@ impl AtomicFile {
         buf[33..37].copy_from_slice(&version_bytes);
         let iden_bytes = self.identifier.as_bytes();
         buf[37..37 + iden_bytes.len()].copy_from_slice(iden_bytes);
-        buf[37 + iden_bytes.len()] = 255; // we use a non-ascii character to denote the end of the identifier
+        buf[37 + iden_bytes.len()] = '\n' as u8;
+        buf[38 + iden_bytes.len()] = 255; // newline+255 is the termination sequence for identifier
         buf[4095] = '\n' as u8;
 
         // Grab the checksum of the data and fill it in as the first 32 bytes.
