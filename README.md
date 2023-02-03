@@ -22,7 +22,7 @@ forms of corruption (which stem from power being lost unexpectedly).
 
 The 'Atomic' property of the AtomicFile is that the only read and write operations fully read
 or fully write the file.
-```
+```rs
 // Basic file operations
 
 use std::path::PathBuf;
@@ -54,7 +54,7 @@ AtomicFile uses a versioning and upgrading scheme to simplify the process of rel
 versions of a file. When opening a file, you pass in a version number and an upgrade path which
 will allow the file opening process to automatically upgrade your files from their current
 version to the latest version.
-```
+```rs
 // Simple upgrade example
 use std::path::PathBuf;
 
