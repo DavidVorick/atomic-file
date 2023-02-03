@@ -117,7 +117,7 @@
 //!
 //! If you would like to contribute to this crate, the implementation of the 'Upgrade' is
 //! particularly gnarly, owing to me being unable to figure out the best way to approach function
-//! pointers in Rust. If you know of a cleaner or simpler implementation, a pull requeest is warmly
+//! pointers in Rust. If you know of a cleaner or simpler implementation, a pull request is warmly
 //! welcomed.
 
 use async_std::fs::{File, OpenOptions};
