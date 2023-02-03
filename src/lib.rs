@@ -180,6 +180,21 @@ pub struct AtomicFile {
     version: u8,
 }
 
+/// add_extension will add a new extension to the provided pathbuf, rather than overwriting the
+/// existing one. For example, 'add_extension("stuff.tar", "gz")' returns 'stuff.tar.gz', while
+/// calling set_extension directly would return 'stuff.gz', which is the wrong result.
+fn add_extension(path: &mut PathBuf, extension: &str) {
+    match path.extension() {
+        Some(ext) => {
+            let mut ext = ext.to_os_string();
+            ext.push(".");
+            ext.push(extension);
+            path.set_extension(ext)
+        }
+        None => path.set_extension(extension),
+    };
+}
+
 /// version_to_bytes will write out the version in ascii, adding leading zeroes if needed and
 /// placing a newline at the end.
 fn version_to_bytes(version: u8) -> [u8; 4] {
@@ -455,11 +470,12 @@ async fn perform_file_upgrades(
 /// delete_file will delete the atomic file at the given filepath. This will delete both the
 /// .atomic_file and the .atomic_file_backup
 pub async fn delete_file(filepath: &PathBuf) -> Result<(), Error> {
-    let mut path = filepath.clone();
-    path.set_extension("atomic_file_backup");
-    async_std::fs::remove_file(path.clone()).await.context("unable to backup file")?;
-    path.set_extension("atomic_file");
-    async_std::fs::remove_file(path.clone()).await.context("unable to main file")?;
+    let mut main_path = filepath.clone();
+    let mut backup_path = filepath.clone();
+    add_extension(&mut main_path, "atomic_file");
+    async_std::fs::remove_file(main_path.clone()).await.context("unable to backup file")?;
+    add_extension(&mut backup_path, "atomic_file_backup");
+    async_std::fs::remove_file(backup_path.clone()).await.context("unable to remove main file")?;
     Ok(())
 }
 
@@ -505,8 +521,8 @@ pub async fn open_file(
     // Start by opening both the main file and the backup file.
     let mut filepath = filepath.clone();
     let mut backup_filepath = filepath.clone();
-    filepath.set_extension("atomic_file");
-    backup_filepath.set_extension("atomic_file_backup");
+    add_extension(&mut filepath, "atomic_file");
+    add_extension(&mut backup_filepath, "atomic_file_backup");
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -723,8 +739,8 @@ mod tests {
         Ok(b"testtesttest".to_vec())
     }
 
-    #[async_std::test]
     // Do basic testing of all the major functions for VersionedFiles
+    #[async_std::test]
     async fn smoke_test() {
         // Create a basic versioned file.
         let dir = testdir!();
@@ -829,7 +845,7 @@ mod tests {
         // Corrupt the data of the file. It should open correctly, and then after opening the
         // corruption should be repaired.
         let mut test_main = test_dat.clone();
-        test_main.set_extension("atomic_file");
+        add_extension(&mut test_main, "atomic_file");
         let original_data = std::fs::read(&test_main).unwrap();
         std::fs::write(&test_main, b"file corruption!").unwrap();
         open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain)
@@ -844,7 +860,6 @@ mod tests {
         open_file_v1(&test_dat, "versioned_file::test.dat::after_delete")
             .await
             .unwrap();
-
     }
 
     #[test]
