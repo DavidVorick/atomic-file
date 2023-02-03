@@ -223,7 +223,7 @@ fn identifier_and_version_from_metadata(metadata: &[u8]) -> Result<(String, u8),
     }
 
     let version_str =
-        from_utf8(&metadata[33..36]).context("the on-disk version could not be parsed")?;
+        from_utf8(&metadata[65..68]).context("the on-disk version could not be parsed")?;
     let version: u8 = version_str
         .parse()
         .context("unable to parse version of metadata")?;
@@ -231,14 +231,14 @@ fn identifier_and_version_from_metadata(metadata: &[u8]) -> Result<(String, u8),
     let mut clean_identifier = false;
     let mut identifier = "".to_string();
     for i in 0..201 {
-        if metadata[i + 37] == '\n' as u8 && metadata[i + 37 + 1] == 255 {
+        if metadata[i + 69] == '\n' as u8 && metadata[i + 70] == 255 {
             clean_identifier = true;
             break;
         }
-        if metadata[i + 37] > 127 {
+        if metadata[i + 69] > 127 {
             bail!("identifier contains non-ascii characters before termination sequence");
         }
-        identifier.push(metadata[i + 37] as char);
+        identifier.push(metadata[i + 69] as char);
     }
     if !clean_identifier {
         bail!("provided metadata does not have a legally terminating identifier");
@@ -249,7 +249,7 @@ fn identifier_and_version_from_metadata(metadata: &[u8]) -> Result<(String, u8),
 
 impl AtomicFile {
     /// fill_metadata will write the first 4096 bytes to contain the proper metadata for the file,
-    /// including the first 32 bytes which serve as the checksum.
+    /// including the first 64 bytes which serve as the checksum.
     fn fill_metadata(&self, buf: &mut [u8]) {
         if buf.len() < 4096 {
             panic!("misuse of fill_metadata, check stack trace");
@@ -262,19 +262,20 @@ impl AtomicFile {
         let version_bytes = version_to_bytes(self.version);
 
         // Fill out the header data.
-        buf[32] = '\n' as u8;
-        buf[33..37].copy_from_slice(&version_bytes);
+        buf[64] = '\n' as u8;
+        buf[65..69].copy_from_slice(&version_bytes);
         let iden_bytes = self.identifier.as_bytes();
-        buf[37..37 + iden_bytes.len()].copy_from_slice(iden_bytes);
-        buf[37 + iden_bytes.len()] = '\n' as u8;
-        buf[38 + iden_bytes.len()] = 255; // newline+255 is the termination sequence for identifier
+        buf[69..69 + iden_bytes.len()].copy_from_slice(iden_bytes);
+        buf[69 + iden_bytes.len()] = '\n' as u8;
+        buf[70 + iden_bytes.len()] = 255; // newline+255 is the termination sequence for identifier
         buf[4095] = '\n' as u8;
 
-        // Grab the checksum of the data and fill it in as the first 32 bytes.
+        // Grab the checksum of the data and fill it in as the first 64 bytes.
         let mut hasher = Sha256::new();
-        hasher.update(&buf[32..]);
+        hasher.update(&buf[64..]);
         let result = hasher.finalize();
-        buf[..32].copy_from_slice(&result);
+        let result_hex = hex::encode(result);
+        buf[..64].copy_from_slice(result_hex.as_bytes());
     }
 
     /// len will return the size of the file, not including the versioned header.
@@ -554,9 +555,11 @@ pub async fn open_file(
             .context("unable to read file")?;
 
         let mut hasher = Sha256::new();
-        hasher.update(&buf[32..]);
+        hasher.update(&buf[64..]);
         let result = hasher.finalize();
-        if result[..] == buf[..32] {
+        let result_hex = hex::encode(result);
+        let result_hex_bytes = result_hex.as_bytes();
+        if result_hex_bytes[..] == buf[..64] {
             let (identifier, version) = identifier_and_version_from_metadata(&buf[..4096])
                 .context("unable to parse version and identifier from file metadata")?;
             if identifier != expected_identifier {
@@ -593,9 +596,11 @@ pub async fn open_file(
             .context("unable to read backup_file")?;
 
         let mut hasher = Sha256::new();
-        hasher.update(&buf[32..]);
+        hasher.update(&buf[64..]);
         let result = hasher.finalize();
-        if result[..] == buf[..32] {
+        let result_hex = hex::encode(result);
+        let result_hex_bytes = result_hex.as_bytes();
+        if result_hex_bytes[..] == buf[..64] {
             let (identifier, version) = identifier_and_version_from_metadata(&buf[..4096])
                 .context("unable to parse version and identifier from file metadata")?;
             if identifier != expected_identifier {
