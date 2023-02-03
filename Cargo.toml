@@ -1,8 +1,8 @@
 [package]
 name = "atomic-file"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
-description = "library for securely writing to files"
+description = "library for upgradeable ACID one-shot files"
 license = "MIT"
 repository = "https://github.com/DavidVorick/atomic-file"
 

@@ -3,44 +3,44 @@
 #![deny(unused_must_use)]
 #![deny(unused_mut)]
 
-//! The AtomicFile crate provides a wrapper to async_std::File which adds an invisible 4096 byte
-//! header to the file which declares the type and version of the file. The final byte of the
-//! invisible header is a newline, allowing the logical contents of the file to be slightly more
-//! readable in vim. The full contents of the file are kept in memory while the file handle is
-//! open.
+//! The AtomicFile crate provides a wrapper to async_std::File to enable more convenient and safe
+//! interactions with on-disk data. All operations on AtomicFile are ACID, and the AtomicFile type
+//! includes an invisible 4096 byte header which manages details like version number and file
+//! identifier.
 //!
-//! The AtomicFile is a safe, ACID compliant abstraction which allows you to write the contents of
-//! the file to disk as one atomic unit. Contrary to intuition, achieving this safely requires
-//! more than just writing out all the data at once. Even if the file is first being written, there
-//! is a chance that the file write is incomplete, leaving behind corrupted remains that may or may
-//! not be detectable as corrupted upon the next read.
+//! The main use of a version number and file identifier are to provide easy upgrade capabilities
+//! for AtomicFiles, and also to ensure that the wrong file is never being opened.
 //!
-//! Overwriting an existing file poses even more challenges, because it gives you an opportunity to
-//! destroy user data that was previously safe and reliable. If the write operation fails or the
-//! computer experiences a sudden loss of power, there needs to be a means of recovering the
-//! previously written data.
+//! The main advantage of using an AtomicFile is its ACID compliance, which ensures that data will
+//! never be corrupted in the event of a sudden loss of power. Typical file usage patters leave
+//! users vulnerable to corruption, especially when updating a file. AtomicFile protects against
+//! corruption by using a double-write scheme to guarantee that correct data exists on disk, and
+//! uses a checksum to verify at startup that the correct instance of the doubly-written file is
+//! loaded. This does mean that two files will exist on disk for each AtomicFile - a .atomic_file
+//! and a .atomic_file_backup.
 //!
-//! AtomicFile accomplishes this by making and fsyncing a fully copy of the new file before
-//! overwriting any existing data, and by putting a hash of the physical contents of the file into
-//! the invisible header. When the file is opened, the hash is checked. If the hash doesn't match,
-//! the logic of the AtomicFile library guarantees that an intact backup of the file - with a
-//! matching hash - will exist unless serious hardware malfunctions are occurring.
+//! Data corruption can still occur in the event of something extreme like physical damage to the
+//! hard drive, but changes of recovery are better and the user is protected against all common
+//! forms of corruption (which stem from power being lost unexpectedly).
+//!
+//! The 'Atomic' property of the AtomicFile is that the only read and write operations fully read
+//! or fully write the file.
 //! ```
 //! // Basic file operations
 //!
 //! use std::path::PathBuf;
-//! use atomic_file::{open_file_v1};
+//! use atomic_file::open_file_v1;
 //!
 //! #[async_std::main]
 //! async fn main() {
-//!     // Create a version 1 file with open_file_v1.
+//!     // Create a version 1 file with open_file_v1. If no file exists yet, a new blank file
+//!     // will be created.
 //!     let mut path = PathBuf::new();
 //!     path.push("target");
-//!     path.push("docs-example-v1.txt");
-//!     let identifier = "AtomicFileDocs::docs-example-v1.txt";
+//!     path.push("docs-example-1");
+//!     let identifier = "AtomicFileDocs::docs-example-1";
 //!     let mut file = open_file_v1(&path, identifier).await.unwrap();
 //!     // The above call is an alias of 'open_file(&path, identifier, 1, Vec::new())'
-//!     // open_file will create a new file if one doesn't exist
 //!
 //!     // Use 'contents' and 'write_file' to read and write the logical data of the file. Each
 //!     // one will always read or write the full contents of the file.
@@ -49,6 +49,8 @@
 //!     if file_data != b"hello, world!" {
 //!         panic!("example did not read correctly");
 //!     }
+//!     # drop(file);
+//!     # atomic_file::delete_file(&path).await.unwrap();
 //! }
 //! ```
 //! AtomicFile uses a versioning and upgrading scheme to simplify the process of releasing new
@@ -60,33 +62,37 @@
 //! use std::path::PathBuf;
 //!
 //! use anyhow::{bail, Result, Error};
-//! use atomic_file::{open_file, wrap_upgrade_process, Upgrade, VersionedFile};
+//! use atomic_file::{open_file, wrap_upgrade_process, AtomicFile, Upgrade};
 //!
 //! // An example of a function that upgrades a file from version 1 to version 2, while making
 //! // changes to the body of the file.
 //! async fn example_upgrade(
-//!     mut file: AtomicFile,
+//!     data: Vec<u8>,
 //!     initial_version: u8,
 //!     updated_version: u8,
-//! ) -> Result<(), Error> {
+//! ) -> Result<Vec<u8>, Error> {
 //!     // Check that the version is okay.
 //!     if initial_version != 1 || updated_version != 2 {
 //!         bail!("wrong version");
 //!     }
 //!
-//!     // Read the data from the file and append an extra two exclamation points.
-//!     let mut file_data = file.contents();
-//!     file_data.push(b"!!");
-//!     file.write_file(file_data).await.unwrap();
-//!     Ok(())
+//!     // Return updated contents for the file.
+//!     Ok((b"hello, update!".to_vec()))
 //! }
 //!
 //! #[async_std::main]
 //! async fn main() {
+//!     # let mut p = PathBuf::new();
+//!     # p.push("target");
+//!     # p.push("docs-example-2");
+//!     # let i = "AtomicFileDocs::docs-example-2";
+//!     # let mut f = atomic_file::open_file_v1(&p, i).await.unwrap();
+//!     # f.write_file(b"hello, world!").await.unwrap();
+//!     # drop(f);
 //!     let mut path = PathBuf::new();
 //!     path.push("target");
-//!     path.push("docs-example-v1.txt");
-//!     let identifier = "AtomicFileDocs::docs-example-v1.txt";
+//!     path.push("docs-example-2");
+//!     let identifier = "AtomicFileDocs::docs-example-2";
 //!     let upgrade = Upgrade {
 //!         initial_version: 1,
 //!         updated_version: 2,
@@ -94,33 +100,25 @@
 //!     };
 //!     let mut file = open_file(&path, identifier, 2, &vec![upgrade]).await.unwrap();
 //!     // Note that the wrap_upgrade_process call is necessary to create the correct function
-//!     // pointer for the upgrade. Also note that the upgrades are passed in as a vector, allowing
-//!     // the caller to define upgrades for 1 -> 2, 2 -> 3, etc, which will all be called in a chain.
+//!     // pointer for the upgrade. Also note that the upgrades are passed in as a vector,
+//!     // allowing the caller to define upgrades for 1 -> 2, 2 -> 3, etc, which will all be
+//!     // called in a chain, such that the call to 'open' does not return until the file
+//!     // has been upgraded all the way to the latest version.
 //!     let file_data = file.contents();
-//!     if file_data != b"hello, world!!!" {
-//!         panic!("upgrade appears to have failed");
+//!     if file_data != b"hello, update!" {
+//!         panic!("upgrade appears to have failed: \n{:?}\n{:?}", file_data, b"hello, update!");
 //!     }
 //!
-//!     // Clean-up
-//!     std::fs::remove_file(path);
+//!     // Perform cleanup.
+//!     drop(file);
+//!     atomic_file::delete_file(&path).await.unwrap();
 //! }
-
-// TODO: Review the below suggested tasks after implementation is complete and see how many are
-// needed.
-
-// CONTRIBUTE: The way that we handle UpgradeFunc/wrap_upgrade_process is unweildly and
-// unfortunate. It's the best I was able to do myself, but I would not be surprised if a much
-// better technique exists. Pull requests to clean this up are warmly welcomed.
-//
-// CONTRIBUTE: VersionedFile has a fragile relationship between the cursor of a File handle and the
-// field `Versionedfile.cursor` - the two are not guaranteed to be in sync, but if they ever fall
-// out of sync there will be severe bugs that can cause data loss. Checking that the two are in
-// sync at runtime is expensive, but we could have a probabilistic check, where maybe one in 100
-// operations it checks that the two are in sync and throws a panic if the two fall out of sync.
-//
-// CONTRIBUTE: There is not great test coverage around error handling for VersionedFile, in
-// particular handling errors where the filesystem fails, especially around the 'needs_seek'
-// features. Extra test coverage is warmly welcomed.
+//! ```
+//!
+//! If you would like to contribute to this crate, the implementation of the 'Upgrade' is
+//! particularly gnarly, owing to me being unable to figure out the best way to approach function
+//! pointers in Rust. If you know of a cleaner or simpler implementation, a pull requeest is warmly
+//! welcomed.
 
 use async_std::fs::{File, OpenOptions};
 use async_std::io::prelude::SeekExt;
@@ -134,28 +132,26 @@ use std::str::from_utf8;
 use anyhow::{bail, Context, Error, Result};
 use sha2::{Digest, Sha256};
 
-/// UpgradeFunc defines the signature for a function that can be used to upgrade a
-/// VersionedFile. The UpgradeFunc function will receive the file that needs to be upgraded, and
-/// it will also receive the intended initial and upgraded version. The version inputs
-/// allow the upgrade function to double check that the right upgrade is being used - if a bug in
-/// the library somehow causes the wrong upgrade to be used, the user may end up with corrupted
-/// data. For that reason, we place extra redundancy around the version checks.
+/// UpgradeFunc defines the signature for a function that can be used to upgrade an
+/// AtomicFile. The UpgradeFunc function will receive the file data that needs to be upgraded along
+/// with the intended initial version and final version that is expected from the upgrade.
 ///
-/// UpgradeFunc functions cannot be used directly due to Rust's current inability to support
-/// async function pointers. To use an UpgradeFunc, one must call `wrap_upgrade_process` first.
+/// We pass in the initial version and final version as arguments to provide an extra level of
+/// redundancy and to prevent mistakes when copy-pasting upgrades, as an incorrect upgrade could
+/// corrupt user data.
 pub type UpgradeFunc =
-    fn(data: &mut Vec<u8>, initial_version: u8, upgraded_version: u8) -> Result<(), Error>;
+    fn(data: Vec<u8>, initial_version: u8, upgraded_version: u8) -> Result<Vec<u8>, Error>;
 
 /// WrappedUpgradeFunc is a type that wraps an UpgradeFunc so that the UpgradeFunc can be
 /// used as a function pointer in the call to `open_file`.
 pub type WrappedUpgradeFunc =
-    Box<dyn Fn(&mut Vec<u8>, u8, u8) -> Pin<Box<dyn Future<Output = Result<(), Error>>>>>;
+    Box<dyn Fn(Vec<u8>, u8, u8) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Error>>>>>;
 
 /// wrap_upgrade_process is a function that will convert an UpgradeFunc into a
 /// WrappedUpgradeFunc.
-pub fn wrap_upgrade_process<T>(f: fn(&mut Vec<u8>, u8, u8) -> T) -> WrappedUpgradeFunc
+pub fn wrap_upgrade_process<T>(f: fn(Vec<u8>, u8, u8) -> T) -> WrappedUpgradeFunc
 where
-    T: Future<Output = Result<(), Error>> + 'static,
+    T: Future<Output = Result<Vec<u8>, Error>> + 'static,
 {
     Box::new(move |x, y, z| Box::pin(f(x, y, z)))
 }
@@ -173,12 +169,9 @@ pub struct Upgrade {
 
 /// AtompicFile defines the main type for the crate, and implements an API for safely
 /// handling atomic files. The API is based on the async_std::File interface, but with some
-/// adjustments that are designed to make it both safer and more ergonomic. For example, len() is
-/// exposed directly rather than having to first fetch the file metadata. Another example, all
-/// calls to write will automatically flush() the file.
-///
-/// If a function is not fully documented, it is safe to assume that the function follows the same
-/// convensions/rules as its equivalent function for async_std::File.
+/// adjustments that are designed to make it both safer and more ergonomic. For example, len() is a
+/// direct call rather than a property of a metadata() call.
+#[derive(Debug)]
 pub struct AtomicFile {
     backup_file: File,
     file: File,
@@ -198,9 +191,9 @@ fn version_to_bytes(version: u8) -> [u8; 4] {
     // Compute the 4 version bytes based on the latest version.
     let mut version_string = format!("{}\n", version);
     if version_string.len() == 2 {
-        version_string = format!("00{}", version);
+        version_string = format!("00{}", version_string);
     } else if version_string.len() == 3 {
-        version_string = format!("0{}", version);
+        version_string = format!("0{}", version_string);
     }
     let version_bytes = version_string.as_bytes();
     let mut version_arr = [0u8; 4];
@@ -258,7 +251,7 @@ impl AtomicFile {
         buf[33..37].copy_from_slice(&version_bytes);
         let iden_bytes = self.identifier.as_bytes();
         buf[37..37 + iden_bytes.len()].copy_from_slice(iden_bytes);
-        buf[37 + iden_bytes.len()] = 255; // this is intentionally not valid ascii
+        buf[37 + iden_bytes.len()] = 255; // we use a non-ascii character to denote the end of the identifier
         buf[4095] = '\n' as u8;
 
         // Grab the checksum of the data and fill it in as the first 32 bytes.
@@ -269,12 +262,12 @@ impl AtomicFile {
     }
 
     /// len will return the size of the file, not including the versioned header.
-    pub async fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.logical_data.len()
     }
 
     /// contents will return a copy of the contents of the file.
-    pub async fn contents(&self) -> Vec<u8> {
+    pub fn contents(&self) -> Vec<u8> {
         self.logical_data.clone()
     }
 
@@ -413,12 +406,13 @@ async fn perform_file_upgrade(file: &mut AtomicFile, u: &Upgrade) -> Result<(), 
     }
 
     // Perform the update on the data.
-    (u.process)(&mut file.logical_data, u.initial_version, u.updated_version)
+    let new_data = (u.process)(file.logical_data.clone(), u.initial_version, u.updated_version)
         .await
         .context(format!(
             "unable to complete file upgrade from version {} to {}",
             u.initial_version, u.updated_version
         ))?;
+    file.logical_data = new_data;
 
     // Update the version of the file. We don't actually write the changes to disk yet because
     // these updates are recoverable / repeatable at next boot.
@@ -456,6 +450,23 @@ async fn perform_file_upgrades(
     }
 
     Ok(())
+}
+
+/// delete_file will delete the atomic file at the given filepath. This will delete both the
+/// .atomic_file and the .atomic_file_backup
+pub async fn delete_file(filepath: &PathBuf) -> Result<(), Error> {
+    let mut path = filepath.clone();
+    path.set_extension("atomic_file_backup");
+    async_std::fs::remove_file(path.clone()).await.context("unable to backup file")?;
+    path.set_extension("atomic_file");
+    async_std::fs::remove_file(path.clone()).await.context("unable to main file")?;
+    Ok(())
+}
+
+/// open_file_v1 is a convenience wrapper for open_file which uses '1' as the version and an empty
+/// vector as the upgrade path.
+pub async fn open_file_v1(filepath: &PathBuf, expected_identifier: &str) -> Result<AtomicFile, Error> {
+    open_file(filepath, expected_identifier, 1, &Vec::new()).await
 }
 
 /// open_file will open an atomic file, using the backup of the file if the checksum fails. If the
@@ -519,6 +530,7 @@ pub async fn open_file(
         .context("unable to get file metadata")?;
     let file_len = file_md.len();
     if file_len >= 4096 {
+        println!("opening the file because it seems real");
         let mut buf = vec![0u8; file_len as usize];
         file.read_exact(&mut buf)
             .await
@@ -530,6 +542,9 @@ pub async fn open_file(
         if result[..] == buf[..32] {
             let (identifier, version) = identifier_and_version_from_metadata(&buf[..4096])
                 .context("unable to parse version and identifier from file metadata")?;
+            if identifier != expected_identifier {
+                bail!("file has the wrong identifier");
+            }
             verify_upgrade_paths(&upgrades, version, latest_version)
                 .context("upgrade paths are invalid")?;
             let mut atomic_file = AtomicFile {
@@ -537,7 +552,7 @@ pub async fn open_file(
                 file,
                 identifier,
                 logical_data: buf[4096..].to_vec(),
-                version: latest_version,
+                version,
             };
             perform_file_upgrades(&mut atomic_file, latest_version, upgrades)
                 .await
@@ -566,6 +581,9 @@ pub async fn open_file(
         if result[..] == buf[..32] {
             let (identifier, version) = identifier_and_version_from_metadata(&buf[..4096])
                 .context("unable to parse version and identifier from file metadata")?;
+            if identifier != expected_identifier {
+                bail!("file has the wrong identifier");
+            }
             verify_upgrade_paths(&upgrades, version, latest_version)
                 .context("upgrade paths are invalid")?;
 
@@ -574,14 +592,15 @@ pub async fn open_file(
                 file,
                 identifier,
                 logical_data: buf[4096..].to_vec(),
-                version: latest_version,
+                version,
             };
             perform_file_upgrades(&mut atomic_file, latest_version, upgrades)
                 .await
                 .context("unable to upgrade file")?;
 
             // Backup is fine but file is corrupt; we need to write the full data to the main file
-            // so that the next change is safe.
+            // so that the next change is safe, as the next change will start by overwriting the
+            // backup data.
             atomic_file
                 .file
                 .set_len(buf.len() as u64)
@@ -607,16 +626,19 @@ pub async fn open_file(
         }
     }
 
-    // If the length of the main file is zero, we can assume that the data corruption happened
-    // during the first write of the file and that this file can be treated as brand new.
+    // If the length of the main file is zero after the above checks, we can safely assume that
+    // either this is a fully new file, or any data corruption happened during a previous attempt
+    // at creating the file, therefore we can treat the file as new.
     if file_len == 0 {
-        return Ok(AtomicFile {
+        let mut af = AtomicFile {
             backup_file,
             file,
             identifier: expected_identifier.to_string(),
             logical_data: Vec::new(),
             version: latest_version,
-        });
+        };
+        af.write_file(&Vec::new()).await.context("unable to create new file")?;
+        return Ok(af);
     }
 
     // We should only reach this code if both files have data and are failing the checksum, which
@@ -632,102 +654,73 @@ mod tests {
 
     // Create a helper function which does a null upgrade so that we can do testing of the upgrade
     // path verifier.
-    async fn stub_upgrade(_: VersionedFile, _: u8, _: u8) -> Result<(), Error> {
-        Ok(())
+    async fn stub_upgrade(v: Vec<u8>, _: u8, _: u8) -> Result<Vec<u8>, Error> {
+        Ok(v)
     }
 
     // This is a basic upgrade function that expects the current contents of the file to be
     // "test_data". It will alter the contents so that they say "test".
     async fn smoke_upgrade_1_2(
-        mut vf: VersionedFile,
+        data: Vec<u8>,
         initial_version: u8,
         updated_version: u8,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<u8>, Error> {
         // Verify that the correct version is being used.
         if initial_version != 1 || updated_version != 2 {
             bail!("this upgrade is intended to take the file from version 1 to version 2");
         }
-        if vf.len().await.unwrap() != 9 {
+        if data.len() != 9 {
             bail!("file is wrong len");
         }
-        // Read the file and verify that we are upgrading the correct data.
-        let mut buf = [0u8; 9];
-        vf.read_exact(&mut buf)
-            .await
-            .context("unable to read old file contents")?;
-        if &buf != b"test_data" {
-            bail!(format!("file appears corrupt: {:?}", buf));
+        if data != b"test_data" {
+            bail!(format!("file appears corrupt: {:?}", data));
         }
 
-        // Truncate the file and write the new data into it.
-        let new_data = b"test";
-        vf.set_len(0).await.unwrap();
-        vf.write_all(new_data)
-            .await
-            .context("unable to write new data after deleting old data")?;
-        Ok(())
+        // Replace the data with new data.
+        Ok(b"test".to_vec())
     }
 
     // smoke upgrade 2->3
     async fn smoke_upgrade_2_3(
-        mut vf: VersionedFile,
+        data: Vec<u8>,
         initial_version: u8,
         updated_version: u8,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<u8>, Error> {
         // Verify that the correct version is being used.
         if initial_version != 2 || updated_version != 3 {
             bail!("this upgrade is intended to take the file from version 2 to version 3");
         }
-        if vf.len().await.unwrap() != 4 {
+        if data.len() != 4 {
             bail!("file is wrong len");
         }
-        // Read the file and verify that we are upgrading the correct data.
-        let mut buf = [0u8; 4];
-        vf.read_exact(&mut buf)
-            .await
-            .context("unable to read old file contents")?;
-        if &buf != b"test" {
+        if data != b"test" {
             bail!("file appears corrupt");
         }
 
-        // Truncate the file and write the new data into it.
-        let new_data = b"testtest";
-        vf.set_len(0).await.unwrap();
-        vf.write_all(new_data)
-            .await
-            .context("unable to write new data after deleting old data")?;
-        Ok(())
+        // Replace the data with new data.
+        Ok(b"testtest".to_vec())
     }
 
     // smoke upgrade 3->4
     async fn smoke_upgrade_3_4(
-        mut vf: VersionedFile,
+        data: Vec<u8>,
         initial_version: u8,
         updated_version: u8,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<u8>, Error> {
         // Verify that the correct version is being used.
         if initial_version != 3 || updated_version != 4 {
             bail!("this upgrade is intended to take the file from version 1 to version 2");
         }
-        if vf.len().await.unwrap() != 8 {
+        if data.len() != 8 {
             bail!("file is wrong len");
         }
         // Read the file and verify that we are upgrading the correct data.
-        let mut buf = [0u8; 8];
-        vf.read_exact(&mut buf)
-            .await
-            .context("unable to read old file contents")?;
-        if &buf != b"testtest" {
+        if data != b"testtest" {
             bail!("file appears corrupt");
         }
 
         // Truncate the file and write the new data into it.
-        let new_data = b"testtesttest";
-        vf.set_len(0).await.unwrap();
-        vf.write_all(new_data)
-            .await
-            .context("unable to write new data after deleting old data")?;
-        Ok(())
+        Ok(b"testtesttest".to_vec())
     }
 
     #[async_std::test]
@@ -772,16 +765,14 @@ mod tests {
         let mut file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new())
             .await
             .unwrap();
-        file.write_all(b"test_data").await.unwrap();
-        let mut file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new())
+        file.write_file(b"test_data").await.unwrap();
+        let file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new())
             .await
             .unwrap();
-        if file.len().await.unwrap() != 9 {
+        if file.len() != 9 {
             panic!("file has unexpected len");
         }
-        let mut buf = [0u8; 9];
-        file.read_exact(&mut buf).await.unwrap();
-        if &buf != b"test_data" {
+        if &file.contents() != b"test_data" {
             panic!("data read does not match data written");
         }
         // Try to open the file again and ensure the write happened in the correct spot.
@@ -795,15 +786,13 @@ mod tests {
             updated_version: 2,
             process: wrap_upgrade_process(smoke_upgrade_1_2),
         }];
-        let mut file = open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain)
+        let file = open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain)
             .await
             .unwrap();
-        if file.len().await.unwrap() != 4 {
+        if file.len() != 4 {
             panic!("file has wrong len");
         }
-        let mut buf = [0u8; 4];
-        file.read_exact(&mut buf).await.unwrap();
-        if &buf != b"test" {
+        if &file.contents() != b"test" {
             panic!("data read does not match data written");
         }
         // Try to open the file again to make sure everything still completes.
@@ -822,60 +811,51 @@ mod tests {
             updated_version: 4,
             process: wrap_upgrade_process(smoke_upgrade_3_4),
         });
-        let mut file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain)
+        let file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain)
             .await
             .unwrap();
-        if file.len().await.unwrap() != 12 {
+        if file.len() != 12 {
             panic!("file has wrong len");
         }
-        let mut buf = [0u8; 12];
-        file.read_exact(&mut buf).await.unwrap();
-        if &buf != b"testtesttest" {
+        if &file.contents() != b"testtesttest" {
             panic!("data read does not match data written");
         }
+        drop(file);
         // Try to open the file again to make sure everything still completes.
-        let mut file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain)
+        open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain)
             .await
             .unwrap();
 
-        // Test that the seeking is implemented correctly.
-        file.seek(SeekFrom::End(-5)).await.unwrap();
-        file.write_all(b"NOVELLA").await.unwrap();
-        file.seek(SeekFrom::Current(-3)).await.unwrap();
-        file.seek(SeekFrom::Current(-4)).await.unwrap();
-        file.seek(SeekFrom::Current(-7)).await.unwrap();
-        let mut buf = [0u8; 14];
-        file.read_exact(&mut buf).await.unwrap();
-        if &buf != b"testtesNOVELLA" {
-            panic!(
-                "read data has unexpected result: {} || {}",
-                std::str::from_utf8(&buf).unwrap(),
-                buf[0]
-            );
-        }
-        file.seek(SeekFrom::Current(-2)).await.unwrap();
-        file.seek(SeekFrom::End(-15)).await.unwrap_err();
-        let mut buf = [0u8; 2];
-        file.read_exact(&mut buf).await.unwrap();
-        if &buf != b"LA" {
-            panic!("seek_end error changed file cursor");
-        }
-        file.seek(SeekFrom::Current(-2)).await.unwrap();
-        file.seek(SeekFrom::Current(-13)).await.unwrap_err();
-        file.read_exact(&mut buf).await.unwrap();
-        if &buf != b"LA" {
-            panic!("seek_end error changed file cursor");
-        }
+        // Corrupt the data of the file. It should open correctly, and then after opening the
+        // corruption should be repaired.
+        let mut test_main = test_dat.clone();
+        test_main.set_extension("atomic_file");
+        let original_data = std::fs::read(&test_main).unwrap();
+        std::fs::write(&test_main, b"file corruption!").unwrap();
+        open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain)
+            .await
+            .unwrap();
+        let repaired_data = std::fs::read(&test_main).unwrap();
+        assert!(repaired_data == original_data);
+
+        // Try deleting the file. When we open the file again with a new identifier, the new
+        // identifier should succeed.
+        delete_file(&test_dat).await.unwrap();
+        open_file_v1(&test_dat, "versioned_file::test.dat::after_delete")
+            .await
+            .unwrap();
+
     }
 
     #[test]
     // Attempt to provide comprehensive test coverage of the upgrade path verifier.
     fn test_verify_upgrade_paths() {
         // Passing in no upgrades should be fine.
-        verify_upgrade_paths(&Vec::new(), 0).unwrap_err(); // 0 is not a legal version
-        verify_upgrade_paths(&Vec::new(), 1).unwrap();
-        verify_upgrade_paths(&Vec::new(), 2).unwrap();
-        verify_upgrade_paths(&Vec::new(), 255).unwrap();
+        verify_upgrade_paths(&Vec::new(), 0, 0).unwrap_err(); // 0 is not a legal version
+        verify_upgrade_paths(&Vec::new(), 0, 1).unwrap_err(); // 0 is not a legal version
+        verify_upgrade_paths(&Vec::new(), 1, 1).unwrap();
+        verify_upgrade_paths(&Vec::new(), 2, 2).unwrap();
+        verify_upgrade_paths(&Vec::new(), 255, 255).unwrap();
 
         // Passing in a single upgrade should be okay.
         verify_upgrade_paths(
@@ -884,6 +864,7 @@ mod tests {
                 updated_version: 2,
                 process: wrap_upgrade_process(stub_upgrade),
             }],
+            1,
             2,
         )
         .unwrap();
@@ -896,6 +877,7 @@ mod tests {
                 process: wrap_upgrade_process(stub_upgrade),
             }],
             2,
+            2,
         )
         .unwrap_err();
 
@@ -906,6 +888,7 @@ mod tests {
                 updated_version: 2,
                 process: wrap_upgrade_process(stub_upgrade),
             }],
+            1,
             3,
         )
         .unwrap_err();
@@ -924,6 +907,7 @@ mod tests {
                     process: wrap_upgrade_process(stub_upgrade),
                 },
             ],
+            1,
             3,
         )
         .unwrap();
@@ -947,6 +931,7 @@ mod tests {
                     process: wrap_upgrade_process(stub_upgrade),
                 },
             ],
+            1,
             3,
         )
         .unwrap_err();
@@ -965,6 +950,7 @@ mod tests {
                     process: wrap_upgrade_process(stub_upgrade),
                 },
             ],
+            1,
             3,
         )
         .unwrap();
@@ -983,6 +969,7 @@ mod tests {
                     process: wrap_upgrade_process(stub_upgrade),
                 },
             ],
+            1,
             2,
         )
         .unwrap_err();
@@ -1016,9 +1003,68 @@ mod tests {
                     process: wrap_upgrade_process(stub_upgrade),
                 },
             ],
+            1,
             6,
         )
         .unwrap();
+
+        // Complex valid structure.
+        verify_upgrade_paths(
+            &vec![
+                Upgrade {
+                    initial_version: 1,
+                    updated_version: 3,
+                    process: wrap_upgrade_process(stub_upgrade),
+                },
+                Upgrade {
+                    initial_version: 2,
+                    updated_version: 3,
+                    process: wrap_upgrade_process(stub_upgrade),
+                },
+                Upgrade {
+                    initial_version: 3,
+                    updated_version: 6,
+                    process: wrap_upgrade_process(stub_upgrade),
+                },
+                Upgrade {
+                    initial_version: 4,
+                    updated_version: 6,
+                    process: wrap_upgrade_process(stub_upgrade),
+                },
+            ],
+            1,
+            6,
+        )
+        .unwrap();
+
+        // Complex valid structure.
+        verify_upgrade_paths(
+            &vec![
+                Upgrade {
+                    initial_version: 1,
+                    updated_version: 3,
+                    process: wrap_upgrade_process(stub_upgrade),
+                },
+                Upgrade {
+                    initial_version: 2,
+                    updated_version: 3,
+                    process: wrap_upgrade_process(stub_upgrade),
+                },
+                Upgrade {
+                    initial_version: 3,
+                    updated_version: 6,
+                    process: wrap_upgrade_process(stub_upgrade),
+                },
+                Upgrade {
+                    initial_version: 4,
+                    updated_version: 6,
+                    process: wrap_upgrade_process(stub_upgrade),
+                },
+            ],
+            5,
+            6,
+        )
+        .unwrap_err();
 
         // Complex valid structure, randomly ordered.
         verify_upgrade_paths(
@@ -1049,6 +1095,7 @@ mod tests {
                     process: wrap_upgrade_process(stub_upgrade),
                 },
             ],
+            1,
             6,
         )
         .unwrap();
@@ -1082,28 +1129,19 @@ mod tests {
                     process: wrap_upgrade_process(stub_upgrade),
                 },
             ],
+            1,
             6,
         )
         .unwrap_err();
     }
 
     #[test]
-    fn test_version_to_str() {
-        version_to_str(0).unwrap_err();
-        if version_to_str(1).unwrap() != "001" {
-            panic!("1 failed");
-        }
-        if version_to_str(2).unwrap() != "002" {
-            panic!("2 failed");
-        }
-        if version_to_str(9).unwrap() != "009" {
-            panic!("9 failed");
-        }
-        if version_to_str(39).unwrap() != "039" {
-            panic!("39 failed");
-        }
-        if version_to_str(139).unwrap() != "139" {
-            panic!("139 failed");
-        }
+    fn test_version_to_bytes() {
+        assert!(&version_to_bytes(1) == b"001\n");
+        assert!(&version_to_bytes(2) == b"002\n");
+        assert!(&version_to_bytes(9) == b"009\n");
+        assert!(&version_to_bytes(10) == b"010\n");
+        assert!(&version_to_bytes(39) == b"039\n");
+        assert!(&version_to_bytes(139) == b"139\n");
     }
 }
