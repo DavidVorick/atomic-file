@@ -465,6 +465,13 @@ pub async fn delete_file(filepath: &PathBuf) -> Result<(), Error> {
     Ok(())
 }
 
+/// exists will return whether or not an atomic file is considered to exist on disk.
+pub fn exists(filepath: &PathBuf) -> bool {
+    let mut path = filepath.clone();
+    add_extension(&mut path, "atomic_file");
+    path.exists()
+}
+
 /// open_file_v1 is a convenience wrapper for open_file which uses '1' as the version, an empty
 /// vector as the upgrade path, and 'true' for create_if_not_exists.
 pub async fn open_file_v1(filepath: &PathBuf, expected_identifier: &str) -> Result<AtomicFile, Error> {
@@ -869,7 +876,9 @@ mod tests {
 
         // Delete the file again, then try to open it with 'create_if_not_exists' set to false. The
         // file should not be created, which means it'll fail on subsequent opens as well.
+        assert!(exists(&test_dat));
         delete_file(&test_dat).await.unwrap();
+        assert!(!exists(&test_dat));
         open_file(&test_dat, "versioned_file::test.dat::after_delete", 1, &Vec::new(), false)
             .await
             .unwrap_err();
