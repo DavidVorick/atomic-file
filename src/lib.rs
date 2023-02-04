@@ -62,11 +62,11 @@
 //! use std::path::PathBuf;
 //!
 //! use anyhow::{bail, Result, Error};
-//! use atomic_file::{open_file, wrap_upgrade_process, AtomicFile, Upgrade};
+//! use atomic_file::{open_file, AtomicFile, Upgrade};
 //!
 //! // An example of a function that upgrades a file from version 1 to version 2, while making
 //! // changes to the body of the file.
-//! async fn example_upgrade(
+//! fn example_upgrade(
 //!     data: Vec<u8>,
 //!     initial_version: u8,
 //!     updated_version: u8,
@@ -96,14 +96,12 @@
 //!     let upgrade = Upgrade {
 //!         initial_version: 1,
 //!         updated_version: 2,
-//!         process: wrap_upgrade_process(example_upgrade),
+//!         process: example_upgrade,
 //!     };
 //!     let mut file = open_file(&path, identifier, 2, &vec![upgrade]).await.unwrap();
-//!     // Note that the wrap_upgrade_process call is necessary to create the correct function
-//!     // pointer for the upgrade. Also note that the upgrades are passed in as a vector,
-//!     // allowing the caller to define upgrades for 1 -> 2, 2 -> 3, etc, which will all be
-//!     // called in a chain, such that the call to 'open' does not return until the file
-//!     // has been upgraded all the way to the latest version.
+//!     // Note that the upgrades are passed in as a vector, allowing the caller to
+//!     // define entire upgrade chains, e.g. 1->2 and 2->3. The final file that gets returned
+//!     // will have been upgraded through the chain to the latest version.
 //!     let file_data = file.contents();
 //!     if file_data != b"hello, update!" {
 //!         panic!("upgrade appears to have failed: \n{:?}\n{:?}", file_data, b"hello, update!");
@@ -115,19 +113,19 @@
 //! }
 //! ```
 //!
-//! If you would like to contribute to this crate, the implementation of the 'Upgrade' is
-//! particularly gnarly, owing to me being unable to figure out the best way to approach function
-//! pointers in Rust. If you know of a cleaner or simpler implementation, a pull request is warmly
-//! welcomed.
+//! If you would like to contribute to this crate, we are looking for a way to make the upgrade
+//! functions async+Send as prior attempts were unsuccessful.
 
-use async_std::fs::{File, OpenOptions};
-use async_std::io::prelude::SeekExt;
-use async_std::io::{ReadExt, SeekFrom, WriteExt};
-use async_std::prelude::Future;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::str::from_utf8;
+use async_std::{
+    fs::{File, OpenOptions},
+    io::prelude::SeekExt,
+    io::{ReadExt, SeekFrom, WriteExt},
+};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    str::from_utf8,
+};
 
 use anyhow::{bail, Context, Error, Result};
 use sha2::{Digest, Sha256};
@@ -142,20 +140,6 @@ use sha2::{Digest, Sha256};
 pub type UpgradeFunc =
     fn(data: Vec<u8>, initial_version: u8, upgraded_version: u8) -> Result<Vec<u8>, Error>;
 
-/// WrappedUpgradeFunc is a type that wraps an UpgradeFunc so that the UpgradeFunc can be
-/// used as a function pointer in the call to `open_file`.
-pub type WrappedUpgradeFunc =
-    Box<dyn Fn(Vec<u8>, u8, u8) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Error>>>>>;
-
-/// wrap_upgrade_process is a function that will convert an UpgradeFunc into a
-/// WrappedUpgradeFunc.
-pub fn wrap_upgrade_process<T>(f: fn(Vec<u8>, u8, u8) -> T) -> WrappedUpgradeFunc
-where
-    T: Future<Output = Result<Vec<u8>, Error>> + 'static,
-{
-    Box::new(move |x, y, z| Box::pin(f(x, y, z)))
-}
-
 /// Upgrade defines an upgrade process for upgrading the data in a file from one version to
 /// another.
 pub struct Upgrade {
@@ -164,7 +148,7 @@ pub struct Upgrade {
     /// updated_version designates the version of the file after the upgrade is complete.
     pub updated_version: u8,
     /// process defines the function that is used to upgrade the file.
-    pub process: WrappedUpgradeFunc,
+    pub process: UpgradeFunc,
 }
 
 /// AtompicFile defines the main type for the crate, and implements an API for safely
@@ -424,7 +408,6 @@ async fn perform_file_upgrade(file: &mut AtomicFile, u: &Upgrade) -> Result<(), 
 
     // Perform the update on the data.
     let new_data = (u.process)(file.logical_data.clone(), u.initial_version, u.updated_version)
-        .await
         .context(format!(
             "unable to complete file upgrade from version {} to {}",
             u.initial_version, u.updated_version
@@ -676,13 +659,13 @@ mod tests {
 
     // Create a helper function which does a null upgrade so that we can do testing of the upgrade
     // path verifier.
-    async fn stub_upgrade(v: Vec<u8>, _: u8, _: u8) -> Result<Vec<u8>, Error> {
+    fn stub_upgrade(v: Vec<u8>, _: u8, _: u8) -> Result<Vec<u8>, Error> {
         Ok(v)
     }
 
     // This is a basic upgrade function that expects the current contents of the file to be
     // "test_data". It will alter the contents so that they say "test".
-    async fn smoke_upgrade_1_2(
+    fn smoke_upgrade_1_2(
         data: Vec<u8>,
         initial_version: u8,
         updated_version: u8,
@@ -702,8 +685,7 @@ mod tests {
         Ok(b"test".to_vec())
     }
 
-    // smoke upgrade 2->3
-    async fn smoke_upgrade_2_3(
+    fn smoke_upgrade_2_3(
         data: Vec<u8>,
         initial_version: u8,
         updated_version: u8,
@@ -723,8 +705,7 @@ mod tests {
         Ok(b"testtest".to_vec())
     }
 
-    // smoke upgrade 3->4
-    async fn smoke_upgrade_3_4(
+    fn smoke_upgrade_3_4(
         data: Vec<u8>,
         initial_version: u8,
         updated_version: u8,
@@ -746,7 +727,6 @@ mod tests {
     }
 
     // Do basic testing of all the major functions for VersionedFiles
-    #[async_std::test]
     async fn smoke_test() {
         // Create a basic versioned file.
         let dir = testdir!();
@@ -806,7 +786,7 @@ mod tests {
         let mut upgrade_chain = vec![Upgrade {
             initial_version: 1,
             updated_version: 2,
-            process: wrap_upgrade_process(smoke_upgrade_1_2),
+            process: smoke_upgrade_1_2,
         }];
         let file = open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain)
             .await
@@ -826,12 +806,12 @@ mod tests {
         upgrade_chain.push(Upgrade {
             initial_version: 2,
             updated_version: 3,
-            process: wrap_upgrade_process(smoke_upgrade_2_3),
+            process: smoke_upgrade_2_3,
         });
         upgrade_chain.push(Upgrade {
             initial_version: 3,
             updated_version: 4,
-            process: wrap_upgrade_process(smoke_upgrade_3_4),
+            process: smoke_upgrade_3_4,
         });
         let file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain)
             .await
@@ -868,6 +848,16 @@ mod tests {
             .unwrap();
     }
 
+    #[async_std::test]
+    async fn smoke_test_async_std() {
+        smoke_test().await;
+    }
+
+    #[tokio::test]
+    async fn smoke_test_tokio() {
+        smoke_test().await;
+    }
+
     #[test]
     // Attempt to provide comprehensive test coverage of the upgrade path verifier.
     fn test_verify_upgrade_paths() {
@@ -883,7 +873,7 @@ mod tests {
             &vec![Upgrade {
                 initial_version: 1,
                 updated_version: 2,
-                process: wrap_upgrade_process(stub_upgrade),
+                process: stub_upgrade,
             }],
             1,
             2,
@@ -895,7 +885,7 @@ mod tests {
             &vec![Upgrade {
                 initial_version: 2,
                 updated_version: 2,
-                process: wrap_upgrade_process(stub_upgrade),
+                process: stub_upgrade,
             }],
             2,
             2,
@@ -907,7 +897,7 @@ mod tests {
             &vec![Upgrade {
                 initial_version: 1,
                 updated_version: 2,
-                process: wrap_upgrade_process(stub_upgrade),
+                process: stub_upgrade,
             }],
             1,
             3,
@@ -920,12 +910,12 @@ mod tests {
                 Upgrade {
                     initial_version: 1,
                     updated_version: 2,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 2,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
             ],
             1,
@@ -939,17 +929,17 @@ mod tests {
                 Upgrade {
                     initial_version: 1,
                     updated_version: 2,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 2,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 1,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
             ],
             1,
@@ -963,12 +953,12 @@ mod tests {
                 Upgrade {
                     initial_version: 1,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 2,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
             ],
             1,
@@ -982,12 +972,12 @@ mod tests {
                 Upgrade {
                     initial_version: 1,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 2,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
             ],
             1,
@@ -1001,27 +991,27 @@ mod tests {
                 Upgrade {
                     initial_version: 1,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 2,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 3,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 4,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 5,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
             ],
             1,
@@ -1035,22 +1025,22 @@ mod tests {
                 Upgrade {
                     initial_version: 1,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 2,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 3,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 4,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
             ],
             1,
@@ -1064,22 +1054,22 @@ mod tests {
                 Upgrade {
                     initial_version: 1,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 2,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 3,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 4,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
             ],
             5,
@@ -1093,27 +1083,27 @@ mod tests {
                 Upgrade {
                     initial_version: 5,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 2,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 3,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 1,
                     updated_version: 3,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 4,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
             ],
             1,
@@ -1127,27 +1117,27 @@ mod tests {
                 Upgrade {
                     initial_version: 2,
                     updated_version: 5,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 6,
                     updated_version: 7,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 3,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 1,
                     updated_version: 4,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
                 Upgrade {
                     initial_version: 4,
                     updated_version: 6,
-                    process: wrap_upgrade_process(stub_upgrade),
+                    process: stub_upgrade,
                 },
             ],
             1,

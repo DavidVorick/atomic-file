@@ -112,7 +112,5 @@ async fn main() {
 }
 ```
 
-If you would like to contribute to this crate, the implementation of the 'Upgrade' is
-particularly gnarly, owing to me being unable to figure out the best way to approach function
-pointers in Rust. If you know of a cleaner or simpler implementation, a pull request is warmly
-welcomed.
+If you would like to contribute to this crate, we are looking for a way to make
+the upgrade functions 'async+Send' as prior attempts were not successful.
