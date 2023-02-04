@@ -9,9 +9,10 @@
 //! identifier.
 //!
 //! The main use of a version number and file identifier are to provide easy upgrade capabilities
-//! for AtomicFiles, and also to ensure that the wrong file is never being opened.
+//! for AtomicFiles, and also to ensure that the wrong file is never being opened in the event that
+//! the user incorrectly moved a file from one place to another.
 //!
-//! The main advantage of using an AtomicFile is its ACID compliance, which ensures that data will
+//! The main advantage of using an AtomicFile is its ACID guarantees, which ensures that data will
 //! never be corrupted in the event of a sudden loss of power. Typical file usage patters leave
 //! users vulnerable to corruption, especially when updating a file. AtomicFile protects against
 //! corruption by using a double-write scheme to guarantee that correct data exists on disk, and
@@ -40,7 +41,7 @@
 //!     path.push("docs-example-1");
 //!     let identifier = "AtomicFileDocs::docs-example-1";
 //!     let mut file = open_file_v1(&path, identifier).await.unwrap();
-//!     // The above call is an alias of 'open_file(&path, identifier, 1, Vec::new())'
+//!     // The above call is an alias of 'open_file(&path, identifier, 1, Vec::new(), true)'
 //!
 //!     // Use 'contents' and 'write_file' to read and write the logical data of the file. Each
 //!     // one will always read or write the full contents of the file.
@@ -98,7 +99,7 @@
 //!         updated_version: 2,
 //!         process: example_upgrade,
 //!     };
-//!     let mut file = open_file(&path, identifier, 2, &vec![upgrade]).await.unwrap();
+//!     let mut file = open_file(&path, identifier, 2, &vec![upgrade], false).await.unwrap();
 //!     // Note that the upgrades are passed in as a vector, allowing the caller to
 //!     // define entire upgrade chains, e.g. 1->2 and 2->3. The final file that gets returned
 //!     // will have been upgraded through the chain to the latest version.
@@ -464,29 +465,29 @@ pub async fn delete_file(filepath: &PathBuf) -> Result<(), Error> {
     Ok(())
 }
 
-/// open_file_v1 is a convenience wrapper for open_file which uses '1' as the version and an empty
-/// vector as the upgrade path.
+/// open_file_v1 is a convenience wrapper for open_file which uses '1' as the version, an empty
+/// vector as the upgrade path, and 'true' for create_if_not_exists.
 pub async fn open_file_v1(filepath: &PathBuf, expected_identifier: &str) -> Result<AtomicFile, Error> {
-    open_file(filepath, expected_identifier, 1, &Vec::new()).await
+    open_file(filepath, expected_identifier, 1, &Vec::new(), true).await
 }
 
-/// open_file will open an atomic file, using the backup of the file if the checksum fails. If the
-/// file does not yet exist and no backup file exists, a blank file will be opened. Data will not
-/// be written to the blank file until
+/// open_file will open an atomic file, using the backup of the file if the checksum fails. If
+/// 'create_if_not_exists' is set to 'true', a new file empty file will be created if a file does
+/// not already exist.
 ///
-/// If the file does not yet exist, a new file will be created and the file will be empty. The file
-/// will automatically be assigned the latest_version. If the file exists but has an outdated
-/// version, the upgrades will be used to convert the file to the latest version.
+/// If the version of the file on-disk is outdated, the upgrades will be used in a chain to upgrade
+/// the file to the latest version. If no valid path exists from the file's current version to the
+/// latest version, an error will be returned.
 ///
-/// An error will be returned if the file does exist and has the wrong identifier, or if the file
-/// has a version that is higher than 'latest_version', or if the upgrades do not provide a valid
-/// path from the current version of the file to the latest version, or if both the file and the
-/// backup file are corrupt.
+/// An error will also be returned if the file has the wrong identifier, or if it is determined
+/// that both the file and its backup are corrupt. Both files should only be corrupt in the event
+/// of significant physical damage to the storage device.
 pub async fn open_file(
     filepath: &PathBuf,
     expected_identifier: &str,
     latest_version: u8,
     upgrades: &Vec<Upgrade>,
+    create_if_not_exists: bool,
 ) -> Result<AtomicFile, Error> {
     // Verify that the inputs match all requirements.
     let path_str = filepath.to_str().context("could not stringify path")?;
@@ -503,11 +504,25 @@ pub async fn open_file(
         bail!("version is not allowed to be zero");
     }
 
-    // Start by opening both the main file and the backup file.
+    // Build the paths for the main file and the backup file.
     let mut filepath = filepath.clone();
     let mut backup_filepath = filepath.clone();
     add_extension(&mut filepath, "atomic_file");
     add_extension(&mut backup_filepath, "atomic_file_backup");
+    let filepath_exists = filepath.exists();
+
+    // If the 'create' flag is not set and the main file does not exist, exit with a does not exist
+    // error. We don't care about the backup file in this case, beacuse if the main file wasn't
+    // even created we can assume the file is missing.
+    if !create_if_not_exists && !filepath_exists {
+        bail!("file does not exist");
+    }
+
+    // If the main file does exist, then we should be able to rely on the assumption that either
+    // the main file is not corrupt, or the backup file is not corrupt. If the
+    // 'create_if_not_exists' flag has been set, we'll create a blank file which will fail the
+    // checksum, and then a blank backup will be created with a failed checksum, and then the user
+    // will receive a blank file that's created and ready for them to modify.
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -523,15 +538,13 @@ pub async fn open_file(
         .await
         .context("unable to open versioned file")?;
 
-    // Get the length of the main file. If the main file doesn't have a length of zero, we need to
-    // verify the checksum.
+    // Read the contents of the main file and verify the checksum.
     let file_md = file
         .metadata()
         .await
         .context("unable to get file metadata")?;
     let file_len = file_md.len();
     if file_len >= 4096 {
-        println!("opening the file because it seems real");
         let mut buf = vec![0u8; file_len as usize];
         file.read_exact(&mut buf)
             .await
@@ -542,6 +555,9 @@ pub async fn open_file(
         let result = hasher.finalize();
         let result_hex = hex::encode(result);
         let result_hex_bytes = result_hex.as_bytes();
+
+        // If the checksum passes, perform any required updates on the file and pass the file along to
+        // the user.
         if result_hex_bytes[..] == buf[..64] {
             let (identifier, version) = identifier_and_version_from_metadata(&buf[..4096])
                 .context("unable to parse version and identifier from file metadata")?;
@@ -564,8 +580,8 @@ pub async fn open_file(
         }
     }
 
-    // If we've reached this part of the code, the existing file is either invalid or empty. Try to
-    // read from the backup file and see if that is valid.
+    // If we got this far, the main file exists but was either corrupt or had no data in it. We
+    // check the backup file now.
     let backup_file_md = backup_file
         .metadata()
         .await
@@ -583,6 +599,9 @@ pub async fn open_file(
         let result = hasher.finalize();
         let result_hex = hex::encode(result);
         let result_hex_bytes = result_hex.as_bytes();
+
+        // If the checksum passes, we need to write all of the file data to the main file to
+        // protect against future corruption, then we can return a file to the user.
         if result_hex_bytes[..] == buf[..64] {
             let (identifier, version) = identifier_and_version_from_metadata(&buf[..4096])
                 .context("unable to parse version and identifier from file metadata")?;
@@ -631,9 +650,10 @@ pub async fn open_file(
         }
     }
 
-    // If the length of the main file is zero after the above checks, we can safely assume that
-    // either this is a fully new file, or any data corruption happened during a previous attempt
-    // at creating the file, therefore we can treat the file as new.
+    // If we got this far, we either have a new file or a corrupt file. If the length of the main
+    // file is '0', we assume it's a new file. If the main file has a size of 0 and the backup file
+    // is corrupt, this is still equivalent to having no file at all as it means the file creation
+    // process got interrupted before it completed.
     if file_len == 0 {
         let mut af = AtomicFile {
             backup_file,
@@ -731,44 +751,44 @@ mod tests {
         // Create a basic versioned file.
         let dir = testdir!();
         let test_dat = dir.join("test.dat");
-        open_file(&test_dat, "versioned_file::test.dat", 0, &Vec::new())
+        open_file(&test_dat, "versioned_file::test.dat", 0, &Vec::new(), true)
             .await
             .context("unable to create versioned file")
             .unwrap_err();
-        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new())
+        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), true)
             .await
             .context("unable to create versioned file")
             .unwrap();
         // Try to open it again.
-        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new())
+        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), true)
             .await
             .context("unable to create versioned file")
             .unwrap();
         // Try to open it with the wrong specifier.
-        open_file(&test_dat, "bad_versioned_file::test.dat", 1, &Vec::new())
+        open_file(&test_dat, "bad_versioned_file::test.dat", 1, &Vec::new(), true)
             .await
             .context("unable to create versioned file")
             .unwrap_err();
 
         // Try to make some invalid new files.
         let invalid_name = dir.join("❄️"); // snowflake emoji in filename
-        open_file(&invalid_name, "versioned_file::test.dat", 1, &Vec::new())
+        open_file(&invalid_name, "versioned_file::test.dat", 1, &Vec::new(), true)
             .await
             .context("unable to create versioned file")
             .unwrap_err();
         let invalid_id = dir.join("invalid_identifier.dat");
-        open_file(&invalid_id, "versioned_file::test.dat::❄️", 1, &Vec::new())
+        open_file(&invalid_id, "versioned_file::test.dat::❄️", 1, &Vec::new(), true)
             .await
             .context("unable to create versioned file")
             .unwrap_err();
 
         // Perform a test where we open test.dat and write a small amount of data to it. Then we
         // will open the file again and read back that data.
-        let mut file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new())
+        let mut file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), true)
             .await
             .unwrap();
         file.write_file(b"test_data").await.unwrap();
-        let file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new())
+        let file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), true)
             .await
             .unwrap();
         if file.len() != 9 {
@@ -778,7 +798,7 @@ mod tests {
             panic!("data read does not match data written");
         }
         // Try to open the file again and ensure the write happened in the correct spot.
-        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new())
+        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), true)
             .await
             .unwrap();
 
@@ -788,7 +808,7 @@ mod tests {
             updated_version: 2,
             process: smoke_upgrade_1_2,
         }];
-        let file = open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain)
+        let file = open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain, true)
             .await
             .unwrap();
         if file.len() != 4 {
@@ -798,7 +818,7 @@ mod tests {
             panic!("data read does not match data written");
         }
         // Try to open the file again to make sure everything still completes.
-        open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain)
+        open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain, true)
             .await
             .unwrap();
 
@@ -813,7 +833,7 @@ mod tests {
             updated_version: 4,
             process: smoke_upgrade_3_4,
         });
-        let file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain)
+        let file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, true)
             .await
             .unwrap();
         if file.len() != 12 {
@@ -824,7 +844,7 @@ mod tests {
         }
         drop(file);
         // Try to open the file again to make sure everything still completes.
-        open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain)
+        open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, true)
             .await
             .unwrap();
 
@@ -834,7 +854,7 @@ mod tests {
         add_extension(&mut test_main, "atomic_file");
         let original_data = std::fs::read(&test_main).unwrap();
         std::fs::write(&test_main, b"file corruption!").unwrap();
-        open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain)
+        open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, true)
             .await
             .unwrap();
         let repaired_data = std::fs::read(&test_main).unwrap();
@@ -846,6 +866,16 @@ mod tests {
         open_file_v1(&test_dat, "versioned_file::test.dat::after_delete")
             .await
             .unwrap();
+
+        // Delete the file again, then try to open it with 'create_if_not_exists' set to false. The
+        // file should not be created, which means it'll fail on subsequent opens as well.
+        delete_file(&test_dat).await.unwrap();
+        open_file(&test_dat, "versioned_file::test.dat::after_delete", 1, &Vec::new(), false)
+            .await
+            .unwrap_err();
+        open_file(&test_dat, "versioned_file::test.dat::after_delete", 1, &Vec::new(), false)
+            .await
+            .unwrap_err();
     }
 
     #[async_std::test]
