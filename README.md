@@ -1,5 +1,9 @@
 # atomic-file
 
+[Rust Documentation Here](https://docs.rs/atomic-file/latest/atomic_file)
+
+---
+
 The AtomicFile crate provides a wrapper to async\_std::File to enable more convenient and safe
 interactions with on-disk data. All operations on AtomicFile are ACID, and the AtomicFile type
 includes an invisible 4096 byte header which manages details like version number and file
