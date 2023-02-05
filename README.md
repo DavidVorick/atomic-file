@@ -6,9 +6,10 @@ includes an invisible 4096 byte header which manages details like version number
 identifier.
 
 The main use of a version number and file identifier are to provide easy upgrade capabilities
-for AtomicFiles, and also to ensure that the wrong file is never being opened.
+for AtomicFiles, and also to ensure that the wrong file is never being opened in the event that
+the user incorrectly moved a file from one place to another.
 
-The main advantage of using an AtomicFile is its ACID compliance, which ensures that data will
+The main advantage of using an AtomicFile is its ACID guarantees, which ensures that data will
 never be corrupted in the event of a sudden loss of power. Typical file usage patters leave
 users vulnerable to corruption, especially when updating a file. AtomicFile protects against
 corruption by using a double-write scheme to guarantee that correct data exists on disk, and
@@ -26,18 +27,20 @@ or fully write the file.
 // Basic file operations
 
 use std::path::PathBuf;
-use atomic_file::open_file_v1;
+use atomic_file::{
+    open, open_file,
+    OpenSettings::CreateIfNotExists,
+};
 
 #[async_std::main]
 async fn main() {
-    // Create a version 1 file with open_file_v1. If no file exists yet, a new blank file
-    // will be created.
+    // Create a version 1 file with open_file. We pass in an empty vector for the upgrade path,
+    // and 'CreateIfNotExists' to indicate that we want to create the non-existing file.
     let mut path = PathBuf::new();
     path.push("target");
     path.push("docs-example-1");
     let identifier = "AtomicFileDocs::docs-example-1";
-    let mut file = open_file_v1(&path, identifier).await.unwrap();
-    // The above call is an alias of 'open_file(&path, identifier, 1, Vec::new())'
+    let mut file = open_file(&path, identifier, 1, &Vec::new(), CreateIfNotExists).await.unwrap();
 
     // Use 'contents' and 'write_file' to read and write the logical data of the file. Each
     // one will always read or write the full contents of the file.
@@ -46,6 +49,11 @@ async fn main() {
     if file_data != b"hello, world!" {
         panic!("example did not read correctly");
     }
+    drop(file);
+
+    // Now that we have created a file, we can use 'open(path, identifier)' as an alias for:
+    // 'open_file(path, identifier, 1, Vec::new(), ErrorIfNotExists)'
+    let file = open(&path, identifier);
     # drop(file);
     # atomic_file::delete_file(&path).await.unwrap();
 }
@@ -59,11 +67,13 @@ version to the latest version.
 use std::path::PathBuf;
 
 use anyhow::{bail, Result, Error};
-use atomic_file::{open_file, wrap_upgrade_process, AtomicFile, Upgrade};
+use atomic_file::{open, open_file, AtomicFile, Upgrade};
+use atomic_file::OpenSettings::ErrorIfNotExists;
+# use atomic_file::OpenSettings::CreateIfNotExists;
 
 // An example of a function that upgrades a file from version 1 to version 2, while making
 // changes to the body of the file.
-async fn example_upgrade(
+fn example_upgrade(
     data: Vec<u8>,
     initial_version: u8,
     updated_version: u8,
@@ -83,7 +93,7 @@ async fn main() {
     # p.push("target");
     # p.push("docs-example-2");
     # let i = "AtomicFileDocs::docs-example-2";
-    # let mut f = atomic_file::open_file_v1(&p, i).await.unwrap();
+    # let mut f = atomic_file::open_file(&p, i, 1, &Vec::new(), CreateIfNotExists).await.unwrap();
     # f.write_file(b"hello, world!").await.unwrap();
     # drop(f);
     let mut path = PathBuf::new();
@@ -93,14 +103,12 @@ async fn main() {
     let upgrade = Upgrade {
         initial_version: 1,
         updated_version: 2,
-        process: wrap_upgrade_process(example_upgrade),
+        process: example_upgrade,
     };
-    let mut file = open_file(&path, identifier, 2, &vec![upgrade]).await.unwrap();
-    // Note that the wrap_upgrade_process call is necessary to create the correct function
-    // pointer for the upgrade. Also note that the upgrades are passed in as a vector,
-    // allowing the caller to define upgrades for 1 -> 2, 2 -> 3, etc, which will all be
-    // called in a chain, such that the call to 'open' does not return until the file
-    // has been upgraded all the way to the latest version.
+    let mut file = open_file(&path, identifier, 2, &vec![upgrade], ErrorIfNotExists).await.unwrap();
+    // Note that the upgrades are passed in as a vector, allowing the caller to
+    // define entire upgrade chains, e.g. 1->2 and 2->3. The final file that gets returned
+    // will have been upgraded through the chain to the latest version.
     let file_data = file.contents();
     if file_data != b"hello, update!" {
         panic!("upgrade appears to have failed: \n{:?}\n{:?}", file_data, b"hello, update!");
@@ -112,5 +120,5 @@ async fn main() {
 }
 ```
 
-If you would like to contribute to this crate, we are looking for a way to make
-the upgrade functions 'async+Send' as prior attempts were not successful.
+If you would like to contribute to this crate, we are looking for a way to make the upgrade
+functions async+Send as prior attempts were unsuccessful.
