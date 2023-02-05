@@ -30,18 +30,20 @@
 //! // Basic file operations
 //!
 //! use std::path::PathBuf;
-//! use atomic_file::open_file_v1;
+//! use atomic_file::{
+//!     open, open_file,
+//!     OpenSettings::CreateIfNotExists,
+//! };
 //!
 //! #[async_std::main]
 //! async fn main() {
-//!     // Create a version 1 file with open_file_v1. If no file exists yet, a new blank file
-//!     // will be created.
+//!     // Create a version 1 file with open_file. We pass in an empty vector for the upgrade path,
+//!     // and 'CreateIfNotExists' to indicate that we want to create the non-existing file.
 //!     let mut path = PathBuf::new();
 //!     path.push("target");
 //!     path.push("docs-example-1");
 //!     let identifier = "AtomicFileDocs::docs-example-1";
-//!     let mut file = open_file_v1(&path, identifier).await.unwrap();
-//!     // The above call is an alias of 'open_file(&path, identifier, 1, Vec::new(), true)'
+//!     let mut file = open_file(&path, identifier, 1, &Vec::new(), CreateIfNotExists).await.unwrap();
 //!
 //!     // Use 'contents' and 'write_file' to read and write the logical data of the file. Each
 //!     // one will always read or write the full contents of the file.
@@ -50,6 +52,11 @@
 //!     if file_data != b"hello, world!" {
 //!         panic!("example did not read correctly");
 //!     }
+//!     drop(file);
+//!
+//!     // Now that we have created a file, we can use 'open(path, identifier)' as an alias for:
+//!     // 'open_file(path, identifier, 1, Vec::new(), ErrorIfNotExists)'
+//!     let file = open(&path, identifier);
 //!     # drop(file);
 //!     # atomic_file::delete_file(&path).await.unwrap();
 //! }
@@ -63,7 +70,9 @@
 //! use std::path::PathBuf;
 //!
 //! use anyhow::{bail, Result, Error};
-//! use atomic_file::{open_file, AtomicFile, Upgrade};
+//! use atomic_file::{open, open_file, AtomicFile, Upgrade};
+//! use atomic_file::OpenSettings::ErrorIfNotExists;
+//! # use atomic_file::OpenSettings::CreateIfNotExists;
 //!
 //! // An example of a function that upgrades a file from version 1 to version 2, while making
 //! // changes to the body of the file.
@@ -87,7 +96,7 @@
 //!     # p.push("target");
 //!     # p.push("docs-example-2");
 //!     # let i = "AtomicFileDocs::docs-example-2";
-//!     # let mut f = atomic_file::open_file_v1(&p, i).await.unwrap();
+//!     # let mut f = atomic_file::open_file(&p, i, 1, &Vec::new(), CreateIfNotExists).await.unwrap();
 //!     # f.write_file(b"hello, world!").await.unwrap();
 //!     # drop(f);
 //!     let mut path = PathBuf::new();
@@ -99,7 +108,7 @@
 //!         updated_version: 2,
 //!         process: example_upgrade,
 //!     };
-//!     let mut file = open_file(&path, identifier, 2, &vec![upgrade], false).await.unwrap();
+//!     let mut file = open_file(&path, identifier, 2, &vec![upgrade], ErrorIfNotExists).await.unwrap();
 //!     // Note that the upgrades are passed in as a vector, allowing the caller to
 //!     // define entire upgrade chains, e.g. 1->2 and 2->3. The final file that gets returned
 //!     // will have been upgraded through the chain to the latest version.
@@ -130,6 +139,16 @@ use std::{
 
 use anyhow::{bail, Context, Error, Result};
 use sha2::{Digest, Sha256};
+
+/// OpenSettings provides the two options for opening a file in the event that the file does not
+/// exist: create the file and return an error.
+pub enum OpenSettings {
+    /// A new file will be created if the file does not exist.
+    CreateIfNotExists,
+
+    /// An error will be returned if the file does not exist.
+    ErrorIfNotExists,
+}
 
 /// UpgradeFunc defines the signature for a function that can be used to upgrade an
 /// AtomicFile. The UpgradeFunc function will receive the file data that needs to be upgraded along
@@ -472,10 +491,10 @@ pub fn exists(filepath: &PathBuf) -> bool {
     path.exists()
 }
 
-/// open_file_v1 is a convenience wrapper for open_file which uses '1' as the version, an empty
-/// vector as the upgrade path, and 'true' for create_if_not_exists.
-pub async fn open_file_v1(filepath: &PathBuf, expected_identifier: &str) -> Result<AtomicFile, Error> {
-    open_file(filepath, expected_identifier, 1, &Vec::new(), true).await
+/// open is a convenience wrapper for open_file which uses '1' as the version, an empty vector as
+/// the upgrade path, and ErrorIfNotExists as the open setting.
+pub async fn open(filepath: &PathBuf, expected_identifier: &str) -> Result<AtomicFile, Error> {
+    open_file(filepath, expected_identifier, 1, &Vec::new(), OpenSettings::ErrorIfNotExists).await
 }
 
 /// open_file will open an atomic file, using the backup of the file if the checksum fails. If
@@ -494,7 +513,7 @@ pub async fn open_file(
     expected_identifier: &str,
     latest_version: u8,
     upgrades: &Vec<Upgrade>,
-    create_if_not_exists: bool,
+    open_settings: OpenSettings,
 ) -> Result<AtomicFile, Error> {
     // Verify that the inputs match all requirements.
     let path_str = filepath.to_str().context("could not stringify path")?;
@@ -510,6 +529,12 @@ pub async fn open_file(
     if latest_version == 0 {
         bail!("version is not allowed to be zero");
     }
+
+    // Parse the enum.
+    let create_if_not_exists = match open_settings {
+        OpenSettings::CreateIfNotExists => true,
+        OpenSettings::ErrorIfNotExists => false,
+    };
 
     // Build the paths for the main file and the backup file.
     let mut filepath = filepath.clone();
@@ -683,6 +708,10 @@ mod tests {
     use super::*;
 
     use testdir::testdir;
+    use OpenSettings::{
+        CreateIfNotExists,
+        ErrorIfNotExists,
+    };
 
     // Create a helper function which does a null upgrade so that we can do testing of the upgrade
     // path verifier.
@@ -758,44 +787,44 @@ mod tests {
         // Create a basic versioned file.
         let dir = testdir!();
         let test_dat = dir.join("test.dat");
-        open_file(&test_dat, "versioned_file::test.dat", 0, &Vec::new(), true)
+        open_file(&test_dat, "versioned_file::test.dat", 0, &Vec::new(), CreateIfNotExists)
             .await
             .context("unable to create versioned file")
             .unwrap_err();
-        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), true)
+        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), CreateIfNotExists)
             .await
             .context("unable to create versioned file")
             .unwrap();
         // Try to open it again.
-        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), true)
+        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), CreateIfNotExists)
             .await
             .context("unable to create versioned file")
             .unwrap();
         // Try to open it with the wrong specifier.
-        open_file(&test_dat, "bad_versioned_file::test.dat", 1, &Vec::new(), true)
+        open_file(&test_dat, "bad_versioned_file::test.dat", 1, &Vec::new(), CreateIfNotExists)
             .await
             .context("unable to create versioned file")
             .unwrap_err();
 
         // Try to make some invalid new files.
         let invalid_name = dir.join("❄️"); // snowflake emoji in filename
-        open_file(&invalid_name, "versioned_file::test.dat", 1, &Vec::new(), true)
+        open_file(&invalid_name, "versioned_file::test.dat", 1, &Vec::new(), CreateIfNotExists)
             .await
             .context("unable to create versioned file")
             .unwrap_err();
         let invalid_id = dir.join("invalid_identifier.dat");
-        open_file(&invalid_id, "versioned_file::test.dat::❄️", 1, &Vec::new(), true)
+        open_file(&invalid_id, "versioned_file::test.dat::❄️", 1, &Vec::new(), CreateIfNotExists)
             .await
             .context("unable to create versioned file")
             .unwrap_err();
 
         // Perform a test where we open test.dat and write a small amount of data to it. Then we
         // will open the file again and read back that data.
-        let mut file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), true)
+        let mut file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), CreateIfNotExists)
             .await
             .unwrap();
         file.write_file(b"test_data").await.unwrap();
-        let file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), true)
+        let file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), CreateIfNotExists)
             .await
             .unwrap();
         if file.len() != 9 {
@@ -805,7 +834,7 @@ mod tests {
             panic!("data read does not match data written");
         }
         // Try to open the file again and ensure the write happened in the correct spot.
-        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), true)
+        open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), CreateIfNotExists)
             .await
             .unwrap();
 
@@ -815,7 +844,7 @@ mod tests {
             updated_version: 2,
             process: smoke_upgrade_1_2,
         }];
-        let file = open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain, true)
+        let file = open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain, CreateIfNotExists)
             .await
             .unwrap();
         if file.len() != 4 {
@@ -825,7 +854,7 @@ mod tests {
             panic!("data read does not match data written");
         }
         // Try to open the file again to make sure everything still completes.
-        open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain, true)
+        open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain, CreateIfNotExists)
             .await
             .unwrap();
 
@@ -840,7 +869,7 @@ mod tests {
             updated_version: 4,
             process: smoke_upgrade_3_4,
         });
-        let file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, true)
+        let file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, CreateIfNotExists)
             .await
             .unwrap();
         if file.len() != 12 {
@@ -851,7 +880,7 @@ mod tests {
         }
         drop(file);
         // Try to open the file again to make sure everything still completes.
-        open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, true)
+        open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, CreateIfNotExists)
             .await
             .unwrap();
 
@@ -861,7 +890,7 @@ mod tests {
         add_extension(&mut test_main, "atomic_file");
         let original_data = std::fs::read(&test_main).unwrap();
         std::fs::write(&test_main, b"file corruption!").unwrap();
-        open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, true)
+        open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, CreateIfNotExists)
             .await
             .unwrap();
         let repaired_data = std::fs::read(&test_main).unwrap();
@@ -870,19 +899,22 @@ mod tests {
         // Try deleting the file. When we open the file again with a new identifier, the new
         // identifier should succeed.
         delete_file(&test_dat).await.unwrap();
-        open_file_v1(&test_dat, "versioned_file::test.dat::after_delete")
+        open_file(&test_dat, "versioned_file::test.dat::after_delete", 1, &Vec::new(), CreateIfNotExists)
             .await
             .unwrap();
 
         // Delete the file again, then try to open it with 'create_if_not_exists' set to false. The
-        // file should not be created, which means it'll fail on subsequent opens as well.
+        // file should not be created, which means it'll fail on subsequent opens as well. We also
+        // sneak in a few checks of 'open()'
         assert!(exists(&test_dat));
+        open(&test_dat, "versioned_file::test.dat::after_delete").await.unwrap();
         delete_file(&test_dat).await.unwrap();
+        open(&test_dat, "versioned_file::test.dat::after_delete").await.unwrap_err();
         assert!(!exists(&test_dat));
-        open_file(&test_dat, "versioned_file::test.dat::after_delete", 1, &Vec::new(), false)
+        open_file(&test_dat, "versioned_file::test.dat::after_delete", 1, &Vec::new(), ErrorIfNotExists)
             .await
             .unwrap_err();
-        open_file(&test_dat, "versioned_file::test.dat::after_delete", 1, &Vec::new(), false)
+        open_file(&test_dat, "versioned_file::test.dat::after_delete", 1, &Vec::new(), ErrorIfNotExists)
             .await
             .unwrap_err();
     }
