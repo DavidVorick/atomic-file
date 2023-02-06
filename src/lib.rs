@@ -234,9 +234,11 @@ fn identifier_and_version_from_metadata(metadata: &[u8]) -> Result<(String, u8),
 
     let mut clean_identifier = false;
     let mut identifier = "".to_string();
+    let mut atomic_identifier_offset = 0;
     for i in 0..201 {
-        if metadata[i + 69] == '\n' as u8 && metadata[i + 70] == 255 {
+        if metadata[i + 69] == '\n' as u8 {
             clean_identifier = true;
+            atomic_identifier_offset = i + 70;
             break;
         }
         if metadata[i + 69] > 127 {
@@ -246,6 +248,10 @@ fn identifier_and_version_from_metadata(metadata: &[u8]) -> Result<(String, u8),
     }
     if !clean_identifier {
         bail!("provided metadata does not have a legally terminating identifier");
+    }
+    let atomic_identifier = "DavidVorick/atomic_file\n".as_bytes();
+    if metadata[atomic_identifier_offset..atomic_identifier_offset+24] != atomic_identifier[..] {
+        bail!("file does not appear to be an atomic file");
     }
 
     Ok((identifier, version))
@@ -272,6 +278,8 @@ impl AtomicFile {
         buf[69..69 + iden_bytes.len()].copy_from_slice(iden_bytes);
         buf[69 + iden_bytes.len()] = '\n' as u8;
         buf[70 + iden_bytes.len()] = 255; // newline+255 is the termination sequence for identifier
+        let atomic_identifier = "DavidVorick/atomic_file\n".as_bytes();
+        buf[70 + iden_bytes.len()..70 + iden_bytes.len() + 24].copy_from_slice(atomic_identifier);
         buf[4095] = '\n' as u8;
 
         // Grab the checksum of the data and fill it in as the first 64 bytes.
@@ -528,6 +536,12 @@ pub async fn open_file(
     }
     if latest_version == 0 {
         bail!("version is not allowed to be zero");
+    }
+    // Check that the identifier doesn't contain a newline.
+    for c in expected_identifier.chars() {
+        if c == '\n' {
+            bail!("identifier is not allowed to contain newlines");
+        }
     }
 
     // Parse the enum.
@@ -917,6 +931,12 @@ mod tests {
         open_file(&test_dat, "versioned_file::test.dat::after_delete", 1, &Vec::new(), ErrorIfNotExists)
             .await
             .unwrap_err();
+
+        // Leave one file in the testdir so it can be viewed later.
+        let mut f = open_file(&test_dat, "versioned_file::test.dat::after_delete", 1, &Vec::new(), CreateIfNotExists)
+            .await
+            .unwrap();
+        f.write_file("this is where the real file data is stored!".as_bytes()).await.unwrap();
     }
 
     #[async_std::test]
