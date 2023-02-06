@@ -20,6 +20,11 @@
 //! loaded. This does mean that two files will exist on disk for each AtomicFile - a .atomic_file
 //! and a .atomic_file_backup.
 //!
+//! If a file needs to be manually modified, the checksum can be overwritten. Change the checksum
+//! to 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' (64 chars) and the
+//! checksum will be accepted independent of the file contents. The checks for the identifier will
+//! still trigger.
+//!
 //! Data corruption can still occur in the event of something extreme like physical damage to the
 //! hard drive, but changes of recovery are better and the user is protected against all common
 //! forms of corruption (which stem from power being lost unexpectedly).
@@ -602,9 +607,16 @@ pub async fn open_file(
         let result_hex = hex::encode(result);
         let result_hex_bytes = result_hex.as_bytes();
 
+        // If the file needs to be manually modified for some reason, the hash will no longer work.
+        // By changing the checksum to all 'fffff...', the user/developer is capable of overriding
+        // the checksum.
+        let override_value = [255u8; 32];
+        let override_hex = hex::encode(override_value);
+        let override_hex_bytes = override_hex.as_bytes();
+
         // If the checksum passes, perform any required updates on the file and pass the file along to
         // the user.
-        if result_hex_bytes[..] == buf[..64] {
+        if result_hex_bytes[..] == buf[..64] || buf[..64] == override_hex_bytes[..] {
             let (identifier, version) = identifier_and_version_from_metadata(&buf[..4096])
                 .context("unable to parse version and identifier from file metadata")?;
             if identifier != expected_identifier {
@@ -646,8 +658,8 @@ pub async fn open_file(
         let result_hex = hex::encode(result);
         let result_hex_bytes = result_hex.as_bytes();
 
-        // If the checksum passes, we need to write all of the file data to the main file to
-        // protect against future corruption, then we can return a file to the user.
+        // If the checksum passes, perform any required updates on the file and pass the file along to
+        // the user.
         if result_hex_bytes[..] == buf[..64] {
             let (identifier, version) = identifier_and_version_from_metadata(&buf[..4096])
                 .context("unable to parse version and identifier from file metadata")?;
@@ -721,6 +733,7 @@ pub async fn open_file(
 mod tests {
     use super::*;
 
+    use std::io::{Seek, Write};
     use testdir::testdir;
     use OpenSettings::{
         CreateIfNotExists,
@@ -909,6 +922,34 @@ mod tests {
             .unwrap();
         let repaired_data = std::fs::read(&test_main).unwrap();
         assert!(repaired_data == original_data);
+
+        // Try modifying the checksum of the file to see if it still completes. We modify the raw
+        // data as well to see if the backup loads.
+        let mut raw_file_name = test_dat.clone();
+        add_extension(&mut raw_file_name, "atomic_file");
+        println!("{:?}", raw_file_name);
+        let mut raw_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(raw_file_name)
+            .unwrap();
+        raw_file.set_len(4096).unwrap();
+        raw_file.write("ffff".as_bytes()).unwrap();
+
+        // Try to open the file with a bad checksum and make sure it fails.
+        let shorter_file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, CreateIfNotExists)
+            .await
+            .unwrap();
+        assert!(shorter_file.len() != 0); // should be the original file
+
+        // Write out the full checksum override then see that the file still opens.
+        raw_file.set_len(4096).unwrap();
+        raw_file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        raw_file.write("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".as_bytes()).unwrap();
+        let shorter_file = open(&test_dat, "versioned_file::test.dat")
+            .await
+            .unwrap();
+        assert!(shorter_file.len() == 0); // should accept the manually modified file
 
         // Try deleting the file. When we open the file again with a new identifier, the new
         // identifier should succeed.
