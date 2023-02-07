@@ -178,8 +178,7 @@ pub struct Upgrade {
 
 /// AtompicFile defines the main type for the crate, and implements an API for safely
 /// handling atomic files. The API is based on the async_std::File interface, but with some
-/// adjustments that are designed to make it both safer and more ergonomic. For example, len() is a
-/// direct call rather than a property of a metadata() call.
+/// adjustments that are designed to make it both safer and more ergonomic.
 #[derive(Debug)]
 pub struct AtomicFile {
     backup_file: File,
@@ -293,11 +292,6 @@ impl AtomicFile {
         let result = hasher.finalize();
         let result_hex = hex::encode(result);
         buf[..64].copy_from_slice(result_hex.as_bytes());
-    }
-
-    /// len will return the size of the file, not including the versioned header.
-    pub fn len(&self) -> usize {
-        self.logical_data.len()
     }
 
     /// contents will return a copy of the contents of the file.
@@ -854,7 +848,7 @@ mod tests {
         let file = open_file(&test_dat, "versioned_file::test.dat", 1, &Vec::new(), CreateIfNotExists)
             .await
             .unwrap();
-        if file.len() != 9 {
+        if file.contents().len() != 9 {
             panic!("file has unexpected len");
         }
         if &file.contents() != b"test_data" {
@@ -874,7 +868,7 @@ mod tests {
         let file = open_file(&test_dat, "versioned_file::test.dat", 2, &upgrade_chain, CreateIfNotExists)
             .await
             .unwrap();
-        if file.len() != 4 {
+        if file.contents().len() != 4 {
             panic!("file has wrong len");
         }
         if &file.contents() != b"test" {
@@ -899,7 +893,7 @@ mod tests {
         let file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, CreateIfNotExists)
             .await
             .unwrap();
-        if file.len() != 12 {
+        if file.contents().len() != 12 {
             panic!("file has wrong len");
         }
         if &file.contents() != b"testtesttest" {
@@ -940,7 +934,7 @@ mod tests {
         let shorter_file = open_file(&test_dat, "versioned_file::test.dat", 4, &upgrade_chain, CreateIfNotExists)
             .await
             .unwrap();
-        assert!(shorter_file.len() != 0); // should be the original file
+        assert!(shorter_file.contents().len() != 0); // should be the original file
 
         // Write out the full checksum override then see that the file still opens.
         raw_file.set_len(4096).unwrap();
@@ -949,7 +943,7 @@ mod tests {
         let shorter_file = open(&test_dat, "versioned_file::test.dat")
             .await
             .unwrap();
-        assert!(shorter_file.len() == 0); // should accept the manually modified file
+        assert!(shorter_file.contents().len() == 0); // should accept the manually modified file
 
         // Try deleting the file. When we open the file again with a new identifier, the new
         // identifier should succeed.
