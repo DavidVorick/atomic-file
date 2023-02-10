@@ -21,6 +21,15 @@ uses a checksum to verify at startup that the correct instance of the doubly-wri
 loaded. This does mean that two files will exist on disk for each AtomicFile - a .atomic\_file
 and a .atomic\_file\_backup.
 
+The checksum used by an AtomicFile is 6 bytes. We use a 6 byte checksum because our threat
+model is arbitrary disk failure, not a human adversary. A human adversary could write any
+checksum they want to defeat our corruption detection. The checksum is written as hex in the
+first 12 bytes of the file.
+
+If a file needs to be manually modified, the checksum can be overwritten. Change the checksum
+to 'ffffffffffff' (12 chars) and the checksum will be accepted independent of the file
+contents. The checks for the identifier will still trigger.
+
 Data corruption can still occur in the event of something extreme like physical damage to the
 hard drive, but changes of recovery are better and the user is protected against all common
 forms of corruption (which stem from power being lost unexpectedly).
