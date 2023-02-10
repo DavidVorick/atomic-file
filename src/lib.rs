@@ -20,10 +20,14 @@
 //! loaded. This does mean that two files will exist on disk for each AtomicFile - a .atomic_file
 //! and a .atomic_file_backup.
 //!
+//! The checksum used by an AtomicFile is 6 bytes. We use a 6 byte checksum because our threat
+//! model is arbitrary disk failure, not a human adversary. A human adversary could write any
+//! checksum they want to defeat our corruption detection. The checksum is written as hex in the
+//! first 12 bytes of the file.
+//!
 //! If a file needs to be manually modified, the checksum can be overwritten. Change the checksum
-//! to 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' (64 chars) and the
-//! checksum will be accepted independent of the file contents. The checks for the identifier will
-//! still trigger.
+//! to 'ffffffffffff' (12 chars) and the checksum will be accepted independent of the file
+//! contents. The checks for the identifier will still trigger.
 //!
 //! Data corruption can still occur in the event of something extreme like physical damage to the
 //! hard drive, but changes of recovery are better and the user is protected against all common
@@ -231,7 +235,7 @@ fn identifier_and_version_from_metadata(metadata: &[u8]) -> Result<(String, u8),
     }
 
     let version_str =
-        from_utf8(&metadata[65..68]).context("the on-disk version could not be parsed")?;
+        from_utf8(&metadata[13..16]).context("the on-disk version could not be parsed")?;
     let version: u8 = version_str
         .parse()
         .context("unable to parse version of metadata")?;
@@ -240,15 +244,15 @@ fn identifier_and_version_from_metadata(metadata: &[u8]) -> Result<(String, u8),
     let mut identifier = "".to_string();
     let mut atomic_identifier_offset = 0;
     for i in 0..201 {
-        if metadata[i + 69] == '\n' as u8 {
+        if metadata[i + 17] == '\n' as u8 {
             clean_identifier = true;
-            atomic_identifier_offset = i + 70;
+            atomic_identifier_offset = i + 18;
             break;
         }
-        if metadata[i + 69] > 127 {
+        if metadata[i + 17] > 127 {
             bail!("identifier contains non-ascii characters before termination sequence");
         }
-        identifier.push(metadata[i + 69] as char);
+        identifier.push(metadata[i + 17] as char);
     }
     if !clean_identifier {
         bail!("provided metadata does not have a legally terminating identifier");
@@ -276,22 +280,22 @@ impl AtomicFile {
         let version_bytes = version_to_bytes(self.version);
 
         // Fill out the header data.
-        buf[64] = '\n' as u8;
-        buf[65..69].copy_from_slice(&version_bytes);
+        buf[12] = '\n' as u8;
+        buf[13..17].copy_from_slice(&version_bytes);
         let iden_bytes = self.identifier.as_bytes();
-        buf[69..69 + iden_bytes.len()].copy_from_slice(iden_bytes);
-        buf[69 + iden_bytes.len()] = '\n' as u8;
-        buf[70 + iden_bytes.len()] = 255; // newline+255 is the termination sequence for identifier
+        buf[17..17 + iden_bytes.len()].copy_from_slice(iden_bytes);
+        buf[17 + iden_bytes.len()] = '\n' as u8;
+        buf[18 + iden_bytes.len()] = 255; // newline+255 is the termination sequence for identifier
         let atomic_identifier = "DavidVorick/atomic_file\n".as_bytes();
-        buf[70 + iden_bytes.len()..70 + iden_bytes.len() + 24].copy_from_slice(atomic_identifier);
+        buf[18 + iden_bytes.len()..18 + iden_bytes.len() + 24].copy_from_slice(atomic_identifier);
         buf[4095] = '\n' as u8;
 
         // Grab the checksum of the data and fill it in as the first 64 bytes.
         let mut hasher = Sha256::new();
-        hasher.update(&buf[64..]);
+        hasher.update(&buf[12..]);
         let result = hasher.finalize();
         let result_hex = hex::encode(result);
-        buf[..64].copy_from_slice(result_hex.as_bytes());
+        buf[..12].copy_from_slice(result_hex[..12].as_bytes());
     }
 
     /// contents will return a copy of the contents of the file.
@@ -596,7 +600,7 @@ pub async fn open_file(
             .context("unable to read file")?;
 
         let mut hasher = Sha256::new();
-        hasher.update(&buf[64..]);
+        hasher.update(&buf[12..]);
         let result = hasher.finalize();
         let result_hex = hex::encode(result);
         let result_hex_bytes = result_hex.as_bytes();
@@ -604,13 +608,13 @@ pub async fn open_file(
         // If the file needs to be manually modified for some reason, the hash will no longer work.
         // By changing the checksum to all 'fffff...', the user/developer is capable of overriding
         // the checksum.
-        let override_value = [255u8; 32];
+        let override_value = [255u8; 6];
         let override_hex = hex::encode(override_value);
         let override_hex_bytes = override_hex.as_bytes();
 
         // If the checksum passes, perform any required updates on the file and pass the file along to
         // the user.
-        if result_hex_bytes[..] == buf[..64] || buf[..64] == override_hex_bytes[..] {
+        if result_hex_bytes[..12] == buf[..12] || buf[..12] == override_hex_bytes[..] {
             let (identifier, version) = identifier_and_version_from_metadata(&buf[..4096])
                 .context("unable to parse version and identifier from file metadata")?;
             if identifier != expected_identifier {
@@ -647,14 +651,14 @@ pub async fn open_file(
             .context("unable to read backup_file")?;
 
         let mut hasher = Sha256::new();
-        hasher.update(&buf[64..]);
+        hasher.update(&buf[12..]);
         let result = hasher.finalize();
         let result_hex = hex::encode(result);
         let result_hex_bytes = result_hex.as_bytes();
 
         // If the checksum passes, perform any required updates on the file and pass the file along to
         // the user.
-        if result_hex_bytes[..] == buf[..64] {
+        if result_hex_bytes[..12] == buf[..12] {
             let (identifier, version) = identifier_and_version_from_metadata(&buf[..4096])
                 .context("unable to parse version and identifier from file metadata")?;
             if identifier != expected_identifier {
@@ -939,7 +943,7 @@ mod tests {
         // Write out the full checksum override then see that the file still opens.
         raw_file.set_len(4096).unwrap();
         raw_file.seek(std::io::SeekFrom::Start(0)).unwrap();
-        raw_file.write("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".as_bytes()).unwrap();
+        raw_file.write("ffffffffffff".as_bytes()).unwrap();
         let shorter_file = open(&test_dat, "versioned_file::test.dat")
             .await
             .unwrap();
