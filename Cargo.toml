@@ -1,6 +1,6 @@
 [package]
 name = "atomic-file"
-version = "0.10.3"
+version = "1.0.0"
 edition = "2021"
 description = "library for upgradeable ACID one-shot files"
 license = "MIT"

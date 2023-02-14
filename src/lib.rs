@@ -257,8 +257,8 @@ fn identifier_and_version_from_metadata(metadata: &[u8]) -> Result<(String, u8),
     if !clean_identifier {
         bail!("provided metadata does not have a legally terminating identifier");
     }
-    let atomic_identifier = "DavidVorick/atomic_file\n".as_bytes();
-    if metadata[atomic_identifier_offset..atomic_identifier_offset+24] != atomic_identifier[..] {
+    let atomic_identifier = "DavidVorick/atomic_file-v1\n".as_bytes();
+    if metadata[atomic_identifier_offset..atomic_identifier_offset+27] != atomic_identifier[..] {
         bail!("file does not appear to be an atomic file");
     }
 
@@ -286,8 +286,8 @@ impl AtomicFile {
         buf[17..17 + iden_bytes.len()].copy_from_slice(iden_bytes);
         buf[17 + iden_bytes.len()] = '\n' as u8;
         buf[18 + iden_bytes.len()] = 255; // newline+255 is the termination sequence for identifier
-        let atomic_identifier = "DavidVorick/atomic_file\n".as_bytes();
-        buf[18 + iden_bytes.len()..18 + iden_bytes.len() + 24].copy_from_slice(atomic_identifier);
+        let atomic_identifier = "DavidVorick/atomic_file-v1\n".as_bytes();
+        buf[18 + iden_bytes.len()..18 + iden_bytes.len() + 27].copy_from_slice(atomic_identifier);
         buf[4095] = '\n' as u8;
 
         // Grab the checksum of the data and fill it in as the first 64 bytes.
